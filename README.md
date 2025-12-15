@@ -93,15 +93,16 @@ This implies that the model’s confidence scores can be meaningfully interprete
 
 ### Qualitative Predictions
 
-![galaxy Examples](results/figures/galaxy_examples.png)
 ![Sample Predictions](results/figures/sample_predictions.png)
-![Misclassified Examples](results/figures/misclassified_examples.png)
 
 
 Correctly classified examples show that the network reliably identifies:
 
 - Smooth light distributions and central concentration for elliptical galaxies  
 - Disk-like structures and spiral arm features for spiral galaxies  
+
+![Misclassified Examples](results/figures/misclassified_examples.png)
+
 
 Misclassified examples typically involve:
 
