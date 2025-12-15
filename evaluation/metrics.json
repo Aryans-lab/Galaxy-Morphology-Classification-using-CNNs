@@ -1,0 +1,15 @@
+{
+    "test_accuracy": 0.9291098117828369,
+    "test_loss": 0.18460001051425934,
+    "classification_report": "              precision    recall  f1-score   support\n\n  Elliptical     0.9009    0.9643    0.9315     15390\n      Spiral     0.9616    0.8940    0.9265     15390\n\n    accuracy                         0.9291     30780\n   macro avg     0.9312    0.9291    0.9290     30780\nweighted avg     0.9312    0.9291    0.9290     30780\n",
+    "confusion_matrix": [
+        [
+            14840,
+            550
+        ],
+        [
+            1632,
+            13758
+        ]
+    ]
+}
