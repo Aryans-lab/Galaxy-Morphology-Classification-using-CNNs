@@ -73,6 +73,8 @@ The primary source of error arises from spiral galaxies with weak or poorly reso
 
 ### Per-Class Metrics
 
+![Per Class Metrics](results/figures/per_class_metrics.png)
+
 | Class        | Precision | Recall | F1-score |
 |-------------|----------|--------|---------|
 | Elliptical  | 0.901    | 0.964  | 0.932   |
@@ -90,6 +92,11 @@ This implies that the model’s confidence scores can be meaningfully interprete
 ---
 
 ### Qualitative Predictions
+
+![galaxy Examples](results/figures/galaxy_examples.png)
+![Sample Predictions](results/figures/sample_predictions.png)
+![Misclassified Examples](results/figures/misclassified_examples.png)
+
 
 Correctly classified examples show that the network reliably identifies:
 
