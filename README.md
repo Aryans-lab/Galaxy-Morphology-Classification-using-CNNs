@@ -42,7 +42,7 @@ This ensures that reported metrics reflect true model performance rather than cl
 
 ### Overall Classification Performance
 
-![Confusion Matrix](results/figures/confusion_matrix.png)
+![ROC Curve](results/figures/roc_curve.png)
 
 The convolutional neural network demonstrates strong discriminative capability between elliptical and spiral galaxies.
 
