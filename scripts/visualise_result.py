@@ -3,7 +3,6 @@ import json
 import numpy as np
 import tensorflow as tf
 import matplotlib.pyplot as plt
-import matplotlib as mpl
 import seaborn as sns
 from datetime import datetime
 from sklearn.metrics import roc_curve, auc, precision_recall_curve, confusion_matrix
