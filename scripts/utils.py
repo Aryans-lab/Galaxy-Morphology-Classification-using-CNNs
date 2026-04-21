@@ -3,9 +3,12 @@ import logging
 from datetime import datetime
 
 # Base configuration
-BASE_DIR = r"D:\\ML\\Galaxy Classification"
+# Calculate base directory relative to the script location (one level up from 'scripts/')
+DEFAULT_BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+BASE_DIR = os.getenv("PROJECT_BASE_DIR", DEFAULT_BASE_DIR)
+
 LOG_DIR = os.path.join(BASE_DIR, "logs")
-PROCESSED_DIR = os.path.join(BASE_DIR, "Data", "Processed")
+PROCESSED_DIR = os.path.join(BASE_DIR, "data", "processed")
 IMAGE_DIR = os.path.join(PROCESSED_DIR, "images")
 
 def setup_environment():
