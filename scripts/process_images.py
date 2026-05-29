@@ -18,6 +18,9 @@ def process_images():
         labels = []
         failed_assets = []
         
+        # Pre-compute label mapping for O(1) lookup
+        label_dict = df.set_index('asset_id')['label'].to_dict()
+
         # Process with progress tracking
         for asset_id in tqdm(df['asset_id'].unique(), desc="Processing galaxies"):
             img_path = get_image_path(asset_id)
@@ -25,7 +28,7 @@ def process_images():
                 img = Image.open(img_path)
                 img = img.resize((128, 128)).convert('RGB')
                 images.append(np.array(img))
-                labels.append(df[df['asset_id'] == asset_id]['label'].values[0])
+                labels.append(label_dict[asset_id])
             except Exception as e:
                 failed_assets.append(asset_id)
                 logging.warning(f"Failed {asset_id}: {str(e)}")
