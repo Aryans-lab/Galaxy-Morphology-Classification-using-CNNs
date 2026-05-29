@@ -4,7 +4,7 @@ from PIL import Image
 from tqdm import tqdm
 import logging
 import os
-from utils import BASE_DIR, IMAGE_DIR, get_image_path
+from utils import BASE_DIR, get_image_path
 
 def process_images():
     try:
