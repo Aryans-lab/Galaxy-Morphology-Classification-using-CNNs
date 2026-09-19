@@ -1,42 +1,26 @@
-numpy
-pandas
-scikit-learn
-scipy
-Pillow
-tqdm
+# Core data pipeline
+numpy==1.26.4
+pandas==2.2.2
+scipy==1.13.1
+Pillow==10.4.0
+tqdm==4.66.4
+scikit-image==0.23.2
 
-tensorflow
-keras
-imbalanced-learn
-opencv-python
+# ML / evaluation
+scikit-learn==1.5.1
+imbalanced-learn==0.12.4
+xgboost==2.0.3
 
-albumentations
-scikit-image
+# Deep learning
+tensorflow==2.16.1
 
-matplotlib
-seaborn
-plotly
-wandb 
+# Classical morphology (Sersic fitting)
+astropy==6.1.0
+photutils==1.11.1
 
-astropy
-photutils  
+# Visualization / plotting
+matplotlib==3.9.1
+seaborn==0.13.2
 
-joblib
-memory_profiler
-psutil
-pyarrow 
-
-jupyter
-jupyterlab
-ipython
-pdoc3  
-
-
-shap
-lime
-eli5
-
-
-xgboost  
-lightgbm
-catboost
+# Development
+pytest==8.2.2
