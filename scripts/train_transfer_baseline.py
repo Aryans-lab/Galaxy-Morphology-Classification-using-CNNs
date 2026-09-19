@@ -31,8 +31,13 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from utils import BASE_DIR, PROCESSED_DIR  # noqa: E402
 
 
-def build_model(input_shape=(100, 100, 3)):
-    base = applications.ResNet50(
+def build_model(input_shape=(100, 100, 3), backbone="resnet50"):
+    """Backbone: 'resnet50' (default) or 'resnet18' (~2x faster; use if a
+    training run is close to a wall-clock budget, e.g. Kaggle's 1 h GPU)."""
+    class_name = {"resnet18": "ResNet18", "resnet50": "ResNet50"}.get(backbone)
+    if class_name is None:
+        raise ValueError(f"Unknown backbone: {backbone}")
+    base = getattr(applications, class_name)(
         include_top=False, weights="imagenet", input_shape=input_shape
     )
     base.trainable = False
@@ -52,6 +57,7 @@ def train(
     splits_path=None,
     model_path=None,
     input_shape=(100, 100, 3),
+    backbone="resnet50",
     head_epochs=3,
     fine_tune_epochs=17,
     head_lr=1e-3,
@@ -66,15 +72,14 @@ def train(
     splits_path = splits_path or os.path.join(
         PROCESSED_DIR, "galaxy_dataset_splits_100x100.npz"
     )
-    model_path = model_path or os.path.join(
-        BASE_DIR, "models", "galaxy_classifier_resnet50.keras"
-    )
+    if model_path is None:
+        model_path = os.path.join(BASE_DIR, "models", f"galaxy_classifier_{backbone}.keras")
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     log_dir = os.path.join(BASE_DIR, "logs")
     os.makedirs(log_dir, exist_ok=True)
     os.makedirs(os.path.dirname(model_path), exist_ok=True)
-    tb_dir = os.path.join(log_dir, "tensorboard", f"resnet50_{timestamp}")
+    tb_dir = os.path.join(log_dir, "tensorboard", f"{backbone}_{timestamp}")
 
     # ResNet50 ImageNet weights expect 0-255 uint8 input to
     # preprocess_input; feed that directly (saves a conversion pass).
@@ -87,7 +92,7 @@ def train(
     X_val = applications.resnet50.preprocess_input(X_val.astype("float32"))
 
     tf.keras.utils.set_random_seed(seed)
-    model = build_model(input_shape)
+    model = build_model(input_shape, backbone=backbone)
 
     # Phase 1: head only
     model.compile(
@@ -126,15 +131,17 @@ def train(
         verbose=1,
     )
 
-    with open(os.path.join(log_dir, f"training_history_resnet50_{timestamp}.json"), "w") as f:
+    with open(os.path.join(log_dir, f"training_history_{backbone}_{timestamp}.json"), "w") as f:
         json.dump(history.history, f, indent=4)
-    logging.info(f"ResNet50 training complete. Best model at {model_path}")
+    logging.info(f"{backbone} training complete. Best model at {model_path}")
     return model
 
 
 def main():
     parser = argparse.ArgumentParser(description="Train the ResNet50 transfer baseline")
     parser.add_argument("--model-path", type=str, default=None)
+    parser.add_argument("--backbone", type=str, default="resnet50",
+                        choices=["resnet50", "resnet18"])
     parser.add_argument("--head-epochs", type=int, default=3)
     parser.add_argument("--fine-tune-epochs", type=int, default=17)
     parser.add_argument("--batch-size", type=int, default=32)
@@ -147,22 +154,23 @@ def main():
         format="%(asctime)s - %(levelname)s - %(message)s",
         handlers=[
             logging.FileHandler(
-                os.path.join(BASE_DIR, "logs", f"train_resnet50_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
+                os.path.join(BASE_DIR, "logs", f"train_{args.backbone}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
             ),
             logging.StreamHandler(),
         ],
     )
     train(
         model_path=args.model_path,
+        backbone=args.backbone,
         head_epochs=args.head_epochs,
         fine_tune_epochs=args.fine_tune_epochs,
         batch_size=args.batch_size,
         seed=args.seed,
     )
-    print("ResNet50 training complete.")
+    print(f"{args.backbone} training complete.")
     print("Evaluate with: python scripts/evaluate_model.py "
-          "--model-path models/galaxy_classifier_resnet50.keras "
-          "--output evaluation/metrics_cnn_resnet50.json")
+          f"--model-path models/galaxy_classifier_{args.backbone}.keras "
+          f"--output evaluation/metrics_cnn_{args.backbone}.json")
 
 
 if __name__ == "__main__":

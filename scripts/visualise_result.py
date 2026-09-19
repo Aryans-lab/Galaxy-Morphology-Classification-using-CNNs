@@ -86,7 +86,10 @@ def create_publication_plots(model_path=None, splits_path=None):
         y_pred_classes = (y_pred_probs >= 0.5).astype(int)
 
         # Generate core visualizations
-        plot_training_history(history)
+        if history is not None:
+            plot_training_history(history)
+        else:
+            print("No training history found - skipping training-history plot.")
         plot_class_distribution(labels_all)
         # Sample predictions on the validation split: the model never
         # trained on it (only early-stopped on it), so the displayed
@@ -114,11 +117,14 @@ def create_publication_plots(model_path=None, splits_path=None):
 # DATA LOADING AND UTILITIES
 # =================================================================
 def load_training_history():
-    """Load latest training history"""
+    """Load latest training history, or None if none exists yet
+    (e.g. when running in a session separate from training)."""
+    if not os.path.isdir(CONFIG['history_dir']):
+        return None
     history_files = [f for f in os.listdir(CONFIG['history_dir'])
                    if f.startswith('training_history_') and f.endswith('.json')]
     if not history_files:
-        raise FileNotFoundError("No training history files found")
+        return None
     history_files.sort(reverse=True)
     with open(os.path.join(CONFIG['history_dir'], history_files[0]), 'r') as f:
         return json.load(f)

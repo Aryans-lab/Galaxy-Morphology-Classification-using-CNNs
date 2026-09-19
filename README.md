@@ -213,6 +213,9 @@ Run with `make test` (17 tests).
 ├── scripts/                  # pipeline (see table above) + requirements.txt
 ├── tests/                    # pytest suite
 ├── Makefile                  # make pipeline / make test
+├── KAGGLE_RUNBOOK.md         # exact steps to run the pipeline on Kaggle
+├── kaggle_run.ipynb          # all-in-one Kaggle notebook (Stages 1-6)
+├── make_upload_zips.py       # packages repo + local images for Kaggle upload
 └── README.md
 ```
 

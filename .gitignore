@@ -26,3 +26,6 @@ venv/
 # Local test venv (smoke tests)
 .venv-test/
 venv-test/
+
+# Kaggle upload staging (multi-GB zips - never commit)
+upload/

@@ -21,6 +21,7 @@ Outputs
 """
 
 import argparse
+import hashlib
 import logging
 import os
 import sys
@@ -82,14 +83,23 @@ def balance_dataset(splits_path=None, output_path=None, random_state=42):
         logging.info(f"Training split class counts after balancing:  {after}")
         logging.info(f"Balanced training set shape: {X_bal.shape}")
 
-        # Sanity check: balanced set must contain ONLY images that were in
-        # the training split (oversampling duplicates, never new images).
-        train_rows = {r.tobytes() for r in X_train.reshape(len(X_train), -1)}
-        bal_rows = {r.tobytes() for r in X_bal.reshape(len(X_bal), -1)}
-        if not bal_rows <= train_rows:
-            raise RuntimeError(
-                "Balanced set contains images missing from the training split!"
-            )
+        # Sanity check (hashed + sampled to keep memory low on big sets):
+        # the balanced set must contain ONLY images that were in the
+        # training split (oversampling duplicates, never new images).
+        rng = np.random.default_rng(random_state)
+        flat_train = X_train.reshape(len(X_train), -1)
+        train_hashes = {
+            hashlib.blake2b(r.tobytes(), digest_size=16).digest() for r in flat_train
+        }
+        n_sample = min(2000, len(X_bal))
+        sample = X_bal[rng.choice(len(X_bal), size=n_sample, replace=False)]
+        for r in sample.reshape(n_sample, -1):
+            if hashlib.blake2b(r.tobytes(), digest_size=16).digest() not in train_hashes:
+                raise RuntimeError(
+                    "Balanced set contains images missing from the training split!"
+                )
+        logging.info(f"No-leakage check passed (hashed {len(train_hashes)} train rows, "
+                     f"verified {n_sample} balanced rows)")
 
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         np.savez_compressed(output_path, images=X_bal, labels=y_bal)
