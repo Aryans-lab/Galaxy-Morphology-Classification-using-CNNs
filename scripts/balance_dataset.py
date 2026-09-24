@@ -1,83 +1,106 @@
-import numpy as np
+"""
+balance_dataset.py — Oversample the TRAINING split only.
+=========================================================
+v1 flaw fixed here
+------------------
+v1 balanced the *whole* dataset before splitting, so oversampled duplicates
+could land in the test set.  v2 applies RandomOverSampler strictly to the
+training split *after* make_splits.py has created the split.
+
+Inputs
+------
+data/processed/galaxy_dataset_splits_100x100.npz   (from make_splits.py)
+
+Outputs
+-------
+data/processed/galaxy_dataset_train_balanced.npz
+    keys: images (N, 100, 100, 3) uint8,  labels (N,) int
+"""
+
+import sys
 import os
-import gc
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
 import logging
-from skimage.transform import resize
+from datetime import datetime
+import numpy as np
 from imblearn.over_sampling import RandomOverSampler
-from utils import BASE_DIR
+from utils import BASE_DIR, PROCESSED_DIR, LOG_DIR
 
-def balance_dataset():
-    try:
-        # 1. Load dataset with memory optimization
-        input_path = os.path.join(BASE_DIR, "data", "processed", "galaxy_dataset.npz")
-        with np.load(input_path) as data:
-            X, y = data['images'], data['labels']
-        
-        # 2. Report initial balance
-        unique, counts = np.unique(y, return_counts=True)
-        logging.info(f"Initial class counts: {dict(zip(unique, counts))}")
-        
-        if len(unique) != 2:
-            raise ValueError("Expected binary classification data")
+DEFAULT_SPLITS  = os.path.join(PROCESSED_DIR, "galaxy_dataset_splits_100x100.npz")
+DEFAULT_OUTPUT  = os.path.join(PROCESSED_DIR, "galaxy_dataset_train_balanced.npz")
 
-        # 3. Calculate target size (100*100 preserves details while saving memory)
-        TARGET_SIZE = (100, 100)
-        logging.info(f"Downscaling images to {TARGET_SIZE} for memory efficiency")
-        
-        # 4. Downsample in batches to avoid memory spikes
-        batch_size = 500  # Conservative batch size for 15GB RAM
-        X_ds = np.empty((X.shape[0], *TARGET_SIZE, X.shape[3]), dtype=np.uint8)
-        
-        for i in range(0, len(X), batch_size):
-            end_idx = min(i + batch_size, len(X))
-            batch = X[i:end_idx]
-            
-            # Vectorized resizing with anti-aliasing
-            resized_batch = np.zeros((len(batch), *TARGET_SIZE, 3), dtype=np.float32)
-            for j in range(len(batch)):
-                resized_batch[j] = resize(
-                    batch[j], 
-                    TARGET_SIZE,
-                    preserve_range=True,
-                    anti_aliasing=True
-                )
-            X_ds[i:end_idx] = resized_batch.astype(np.uint8)
-            
-            # Explicit memory cleanup
-            del batch, resized_batch
-            gc.collect()
-        
-        del X  # Free original images (saves 3.3GB+)
-        gc.collect()
-        
-        # 5. Balance with RandomOverSampler (best for image data)
-        ros = RandomOverSampler(random_state=42)
-        X_flat = X_ds.reshape(len(X_ds), -1)  # No memory copy
-        X_bal_flat, y_bal = ros.fit_resample(X_flat, y)
-        
-        # 6. Reshape back to images
-        X_bal = X_bal_flat.reshape(-1, *TARGET_SIZE, 3)
-        
-        # 7. Save memory-optimized balanced dataset
-        output_path = os.path.join(BASE_DIR, "data", "processed", "galaxy_dataset_balanced_96x96.npz")
-        np.savez_compressed(output_path, images=X_bal, labels=y_bal)
-        
-        # 8. Verify and log results
-        unique_bal, counts_bal = np.unique(y_bal, return_counts=True)
-        logging.info(f"Balanced dataset counts: {dict(zip(unique_bal, counts_bal))}")
-        logging.info(f"Final dataset shape: {X_bal.shape}")
-        return True
 
-    except Exception as e:
-        logging.error(f"Balancing failed: {str(e)}", exc_info=True)
-        return False
+def balance_train(
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    random_state: int = 42,
+):
+    """Oversample the minority class in X_train to match the majority.
 
-if __name__ == "__main__":
+    Returns
+    -------
+    X_bal : (N_balanced, H, W, C) uint8
+    y_bal : (N_balanced,) int
+    """
+    unique = np.unique(y_train)
+    if set(unique.tolist()) != {0, 1}:
+        raise ValueError(
+            f"Expected binary labels {{0, 1}}, got {set(unique.tolist())}"
+        )
+
+    shape = X_train.shape[1:]          # (H, W, C)
+    n     = len(X_train)
+
+    ros = RandomOverSampler(random_state=random_state)
+    X_flat, y_bal = ros.fit_resample(X_train.reshape(n, -1), y_train)
+    X_bal = X_flat.reshape(-1, *shape)
+    return X_bal, y_bal
+
+
+def run(
+    splits_path: str = DEFAULT_SPLITS,
+    output_path: str = DEFAULT_OUTPUT,
+    random_state: int = 42,
+) -> bool:
     logging.basicConfig(
         level=logging.INFO,
-        format='%(asctime)s - %(levelname)s - %(message)s'
+        format="%(asctime)s  %(levelname)s  %(message)s",
+        handlers=[
+            logging.StreamHandler(),
+            logging.FileHandler(
+                os.path.join(LOG_DIR, f"balance_{datetime.now():%Y%m%d}.log")
+            ),
+        ],
     )
-    if balance_dataset():
-        print("✅ Balancing completed successfully. Output: galaxy_dataset_balanced_96x96.npz")
-    else:
-        print("❌ Balancing failed - check logs")
+
+    logging.info(f"Loading splits from {splits_path}")
+    data     = np.load(splits_path)
+    X_train  = data["X_train"]
+    y_train  = data["y_train"]
+    logging.info(
+        f"  Train before balancing: {len(y_train)} images  "
+        f"[smooth={(y_train==0).sum()}  disk={(y_train==1).sum()}]"
+    )
+
+    X_bal, y_bal = balance_train(X_train, y_train, random_state=random_state)
+    logging.info(
+        f"  Train after  balancing: {len(y_bal)} images  "
+        f"[smooth={(y_bal==0).sum()}  disk={(y_bal==1).sum()}]"
+    )
+
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    np.savez_compressed(output_path, images=X_bal, labels=y_bal)
+    logging.info(f"Saved -> {output_path}")
+    return True
+
+
+if __name__ == "__main__":
+    import argparse
+    p = argparse.ArgumentParser()
+    p.add_argument("--splits",  default=DEFAULT_SPLITS)
+    p.add_argument("--output",  default=DEFAULT_OUTPUT)
+    p.add_argument("--seed",    type=int, default=42)
+    args = p.parse_args()
+    ok = run(args.splits, args.output, args.seed)
+    print("Done." if ok else "Failed.")
