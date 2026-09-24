@@ -3,7 +3,6 @@ import json
 import numpy as np
 import tensorflow as tf
 import matplotlib.pyplot as plt
-import matplotlib as mpl
 import seaborn as sns
 from datetime import datetime
 from sklearn.metrics import roc_curve, auc, precision_recall_curve, confusion_matrix
@@ -121,7 +120,6 @@ def load_model():
 # =================================================================
 def plot_training_history(history):
     """Training history with smoothed curves"""
-    # Apply simple smoothing for cleaner plots
     def smooth_curve(points, factor=0.8):
         smoothed = []
         for point in points:
@@ -167,7 +165,6 @@ def plot_class_distribution(labels):
     plt.title('Galaxy Class Distribution')
     plt.ylabel('Number of Galaxies')
 
-    # Annotate bars
     for bar, count in zip(bars, class_counts):
         height = bar.get_height()
         plt.text(bar.get_x() + bar.get_width()/2., height,
@@ -284,13 +281,11 @@ def plot_calibration_curve(y_true, y_scores):
 
 def plot_error_analysis(model, X_test, y_test, y_pred):
     """Visualize misclassified examples"""
-    # Identify misclassified samples
     incorrect = np.where(y_pred != y_test)[0]
     if len(incorrect) == 0:
         print("⚠️ No misclassified samples found")
         return
 
-    # Select up to 8 examples
     sample_indices = incorrect[:min(8, len(incorrect))]
     sample_images = X_test[sample_indices]
     sample_true = y_test[sample_indices]
@@ -298,7 +293,6 @@ def plot_error_analysis(model, X_test, y_test, y_pred):
     confidences = predictions.flatten()
     pred_classes = (predictions > 0.5).astype(int).flatten()
 
-    # Create plot
     plt.figure(figsize=(12, 8))
     for i, idx in enumerate(sample_indices):
         plt.subplot(2, 4, i+1)
@@ -328,8 +322,8 @@ def plot_per_class_metrics(y_true, y_pred):
         'F1-score': f1_score(y_true, y_pred, average=None)
     }
 
-    x = np.arange(len(CONFIG['class_names']))  # label locations
-    width = 0.25  # bar width
+    x = np.arange(len(CONFIG['class_names']))
+    width = 0.25
     multiplier = 0
 
     plt.figure(figsize=(10, 6))
@@ -355,7 +349,6 @@ def plot_galaxy_examples(images, labels):
     """Show representative examples of each class"""
     plt.figure(figsize=(10, 5))
 
-    # Elliptical examples
     elliptical_idx = np.where(labels == 0)[0][:4]
     for i, idx in enumerate(elliptical_idx):
         plt.subplot(2, 4, i+1)
@@ -363,7 +356,6 @@ def plot_galaxy_examples(images, labels):
         plt.title('Elliptical', fontsize=10)
         plt.axis('off')
 
-    # Spiral examples
     spiral_idx = np.where(labels == 1)[0][:4]
     for i, idx in enumerate(spiral_idx):
         plt.subplot(2, 4, i+5)
