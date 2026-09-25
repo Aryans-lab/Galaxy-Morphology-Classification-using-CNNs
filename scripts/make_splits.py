@@ -1,77 +1,86 @@
-"""
-make_splits.py — Create the stratified train / val / test split.
-================================================================
-This is the ONLY place the dataset is divided, so that balancing,
-augmentation, and early-stopping can NEVER contaminate the test set.
+"""Create the stratified train/val/test split - the ONLY place data is split.
 
-v1 pipeline flaw this fixes
-----------------------------
-v1 ran RandomOverSampler on the *whole* dataset and then did an 85/15
-split.  Exact-duplicate oversampled images therefore appeared on both
-sides of the split (leakage), and the same 15 % was used for both
-early-stopping *and* final evaluation.
+Why this exists (v2 change)
+---------------------------
+The v1 pipeline ran ``RandomOverSampler`` on the *whole* dataset and only
+then split 85/15. Two problems:
 
-v2 flow
--------
-process_images  →  make_splits  →  balance_dataset (train only)
-→  train_model  →  evaluate_model
+1. **Label leakage** - oversampled duplicates of any image could end up on
+   both sides of the split, so the model was tested on near-identical
+   copies of training examples.
+2. **Optimistic selection** - the same 15% held-out set was used for early
+   stopping *and* final evaluation, i.e. the model was effectively selected
+   on its own test set.
+
+The v2 pipeline fixes both: this script performs a single, logged,
+stratified 70/15/15 split (train/val/test). Balancing is then applied to
+the training split *only* (``balance_dataset.py``), early stopping uses
+the validation split, and the test split is touched exactly once - at
+final evaluation time.
+
+Inputs
+------
+``data/processed/galaxy_dataset.npz``  - keys: images (N,128,128,3) uint8,
+labels (N,) int, optionally asset_ids (N,) int.
 
 Outputs
 -------
-data/processed/galaxy_dataset_splits_100x100.npz
-    keys: X_train, y_train, X_val, y_val, X_test, y_test
-data/processed/splits_manifest.json
-    seed, split sizes, per-class counts, timestamp
+``data/processed/galaxy_dataset_splits_100x100.npz``
+    X_train, y_train, X_val, y_val, X_test, y_test  (100x100, uint8)
+``data/processed/splits_manifest.json``
+    seed, split sizes, per-split class counts, input file, timestamp.
 """
-
-import sys
-import os
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import argparse
 import json
 import logging
+import os
+import sys
 from datetime import datetime
 
 import numpy as np
-from PIL import Image
+from skimage.transform import resize
 from sklearn.model_selection import train_test_split
-from tqdm import tqdm
-from utils import BASE_DIR, PROCESSED_DIR, LOG_DIR
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from utils import BASE_DIR, PROCESSED_DIR  # noqa: E402
+
+CLASS_NAMES = ["Smooth", "Disk/Feature"]  # 0 = elliptical/S0, 1 = spiral/disk
+
 
 # ---------------------------------------------------------------------------
-CLASS_NAMES = ["Smooth", "Disk/Feature"]
-DEFAULT_INPUT  = os.path.join(PROCESSED_DIR, "galaxy_dataset.npz")
-DEFAULT_OUTPUT = os.path.join(PROCESSED_DIR, "galaxy_dataset_splits_100x100.npz")
-DEFAULT_MANIFEST = os.path.join(PROCESSED_DIR, "splits_manifest.json")
+# Core (pure, testable) functions
 # ---------------------------------------------------------------------------
+def resize_dataset(X, target_size=(100, 100), batch_size=500, progress=True):
+    """Batch-resize an (N, H, W, 3) uint8 stack to ``target_size``.
 
-
-def resize_dataset(X: np.ndarray, target: int = 100, batch: int = 500) -> np.ndarray:
-    """Resize (N, H, W, 3) uint8 array to (N, target, target, 3) using PIL BICUBIC."""
-    N = len(X)
-    out = np.empty((N, target, target, 3), dtype=np.uint8)
-    for i in tqdm(range(0, N, batch), desc=f"Resizing -> {target}x{target}"):
-        chunk = X[i : i + batch]
-        for j, img in enumerate(chunk):
-            pil = Image.fromarray(img).resize((target, target), Image.BICUBIC)
-            out[i + j] = np.asarray(pil, dtype=np.uint8)
+    Anti-aliased downsampling (same settings as the v1 balancing step, so
+    results stay comparable).
+    """
+    n = len(X)
+    out = np.empty((n, *target_size, X.shape[-1]), dtype=np.uint8)
+    for i in range(0, n, batch_size):
+        end = min(i + batch_size, n)
+        batch = X[i:end]
+        for j in range(len(batch)):
+            out[i + j] = resize(
+                batch[j], target_size, preserve_range=True, anti_aliasing=True
+            ).astype(np.uint8)
+        if progress:
+            logging.info(f"Resized {end}/{n} images")
     return out
 
 
-def make_split_indices(
-    y: np.ndarray,
-    seed: int = 42,
-    val_frac: float = 0.15,
-    test_frac: float = 0.15,
-):
-    """Return (train_idx, val_idx, test_idx) — stratified, disjoint."""
+def make_split_indices(y, seed=42, val_frac=0.15, test_frac=0.15):
+    """Stratified train/val/test index arrays (fractions of the *total*)."""
+    y = np.asarray(y)
     n = len(y)
-    all_idx = np.arange(n)
-
     rest_frac = val_frac + test_frac
+    if rest_frac >= 1.0:
+        raise ValueError("val_frac + test_frac must be < 1")
+
     train_idx, rest_idx = train_test_split(
-        all_idx, test_size=rest_frac, stratify=y, random_state=seed
+        np.arange(n), test_size=rest_frac, stratify=y, random_state=seed
     )
     val_idx, test_idx = train_test_split(
         rest_idx,
@@ -82,109 +91,97 @@ def make_split_indices(
     return train_idx, val_idx, test_idx
 
 
+# ---------------------------------------------------------------------------
+# File I/O wrapper
+# ---------------------------------------------------------------------------
 def run(
-    input_path: str = DEFAULT_INPUT,
-    output_path: str = DEFAULT_OUTPUT,
-    manifest_path: str = DEFAULT_MANIFEST,
-    target_size: int = 100,
-    seed: int = 42,
-    val_frac: float = 0.15,
-    test_frac: float = 0.15,
-) -> bool:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s  %(levelname)s  %(message)s",
-        handlers=[
-            logging.StreamHandler(),
-            logging.FileHandler(
-                os.path.join(LOG_DIR, f"make_splits_{datetime.now():%Y%m%d}.log")
-            ),
-        ],
+    input_path=None,
+    output_path=None,
+    manifest_path=None,
+    seed=42,
+    val_frac=0.15,
+    test_frac=0.15,
+    target_size=100,
+):
+    input_path = input_path or os.path.join(PROCESSED_DIR, "galaxy_dataset.npz")
+    output_path = output_path or os.path.join(
+        PROCESSED_DIR, f"galaxy_dataset_splits_{target_size}x{target_size}.npz"
     )
+    manifest_path = manifest_path or os.path.join(PROCESSED_DIR, "splits_manifest.json")
 
     logging.info(f"Loading dataset from {input_path}")
-    data = np.load(input_path)
-    X, y = data["images"], data["labels"]
-    logging.info(f"  Loaded {len(X)} images, shape {X.shape}, labels {np.bincount(y)}")
+    with np.load(input_path) as data:
+        X = data["images"]
+        y = data["labels"]
+        asset_ids = data["asset_ids"] if "asset_ids" in data else None
+    logging.info(f"Dataset shape: {X.shape}, class counts: "
+                 f"{dict(zip(*np.unique(y, return_counts=True)))}")
 
-    # ------------------------------------------------------------------
-    # 1. Resize (if needed)
-    # ------------------------------------------------------------------
-    if X.shape[1] != target_size or X.shape[2] != target_size:
-        logging.info(f"Resizing {X.shape[1]}x{X.shape[2]} -> {target_size}x{target_size}")
-        X = resize_dataset(X, target=target_size)
+    X = resize_dataset(X, target_size=(target_size, target_size))
 
-    # ------------------------------------------------------------------
-    # 2. Split
-    # ------------------------------------------------------------------
-    logging.info(f"Splitting  70 / {val_frac*100:.0f} / {test_frac*100:.0f}  (seed={seed})")
     train_idx, val_idx, test_idx = make_split_indices(
         y, seed=seed, val_frac=val_frac, test_frac=test_frac
     )
 
-    splits = dict(
-        X_train=X[train_idx], y_train=y[train_idx],
-        X_val  =X[val_idx],   y_val  =y[val_idx],
-        X_test =X[test_idx],  y_test =y[test_idx],
-    )
+    payload = {
+        "X_train": X[train_idx], "y_train": y[train_idx],
+        "X_val": X[val_idx], "y_val": y[val_idx],
+        "X_test": X[test_idx], "y_test": y[test_idx],
+    }
+    if asset_ids is not None:
+        payload.update({
+            "asset_train": asset_ids[train_idx],
+            "asset_val": asset_ids[val_idx],
+            "asset_test": asset_ids[test_idx],
+        })
 
-    for name, arr in [("train", train_idx), ("val", val_idx), ("test", test_idx)]:
-        counts = np.bincount(y[arr], minlength=2)
-        logging.info(
-            f"  {name:5s}: {len(arr):6d} images  "
-            f"[{CLASS_NAMES[0]}={counts[0]:5d}  {CLASS_NAMES[1]}={counts[1]:5d}]"
-        )
-
-    # ------------------------------------------------------------------
-    # 3. Save
-    # ------------------------------------------------------------------
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    logging.info(f"Saving splits -> {output_path}")
-    np.savez_compressed(output_path, **splits)
+    np.savez_compressed(output_path, **payload)
+    logging.info(f"Saved split dataset to {output_path}")
 
     manifest = {
-        "created_at": datetime.now().isoformat(),
+        "input_file": os.path.basename(input_path),
         "seed": seed,
         "val_frac": val_frac,
         "test_frac": test_frac,
         "target_size": target_size,
-        "n_total": int(len(X)),
+        "created_utc": datetime.utcnow().isoformat(timespec="seconds"),
+        "counts": {
+            split: {int(k): int(v) for k, v in zip(*np.unique(payload[f"y_{split}"], return_counts=True))}
+            for split in ("train", "val", "test")
+        },
         "sizes": {
-            "train": int(len(train_idx)),
-            "val":   int(len(val_idx)),
-            "test":  int(len(test_idx)),
+            split: int(len(payload[f"y_{split}"])) for split in ("train", "val", "test")
         },
-        "class_counts": {
-            split: {cn: int(np.bincount(y[idx], minlength=2)[c])
-                    for c, cn in enumerate(CLASS_NAMES)}
-            for split, idx in [("train", train_idx), ("val", val_idx), ("test", test_idx)]
-        },
+        "class_names": CLASS_NAMES,
     }
     with open(manifest_path, "w") as f:
-        json.dump(manifest, f, indent=2)
-    logging.info(f"Manifest   -> {manifest_path}")
-    return True
+        json.dump(manifest, f, indent=4)
+    logging.info(f"Saved split manifest to {manifest_path}")
+    return manifest
 
 
-# ---------------------------------------------------------------------------
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Create stratified train/val/test splits.")
-    parser.add_argument("--input",  default=DEFAULT_INPUT)
-    parser.add_argument("--output", default=DEFAULT_OUTPUT)
-    parser.add_argument("--manifest", default=DEFAULT_MANIFEST)
-    parser.add_argument("--size",  type=int, default=100, help="Target image side length")
-    parser.add_argument("--seed",  type=int, default=42)
-    parser.add_argument("--val-frac",  type=float, default=0.15)
+def main():
+    parser = argparse.ArgumentParser(description="Create stratified train/val/test splits")
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--val-frac", type=float, default=0.15)
     parser.add_argument("--test-frac", type=float, default=0.15)
+    parser.add_argument("--size", type=int, default=100)
+    parser.add_argument("--input", type=str, default=None)
+    parser.add_argument("--output", type=str, default=None)
     args = parser.parse_args()
 
-    ok = run(
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+    run(
         input_path=args.input,
         output_path=args.output,
-        manifest_path=args.manifest,
-        target_size=args.size,
         seed=args.seed,
         val_frac=args.val_frac,
         test_frac=args.test_frac,
+        target_size=args.size,
     )
-    print("Done." if ok else "Failed — check logs.")
+    print("Splits created. See data/processed/splits_manifest.json for details.")
+
+
+if __name__ == "__main__":
+    main()

@@ -8,7 +8,6 @@ from datetime import datetime
 from sklearn.metrics import roc_curve, auc, precision_recall_curve, confusion_matrix
 from sklearn.calibration import calibration_curve
 from sklearn.metrics import average_precision_score
-from sklearn.model_selection import train_test_split
 from utils import BASE_DIR, LOG_DIR, PROCESSED_DIR
 
 # =================================================================
@@ -36,15 +35,21 @@ sns.set_style("whitegrid", {'grid.linestyle': '--'})
 # =================================================================
 # CONFIGURATION
 # =================================================================
+# Class naming (v2): the GZ2 t01 question separates "completely smooth"
+# (ellipticals + lenticulars) from "features or disk" (spirals + a small
+# fraction of other feature-rich systems). We label the classes after
+# what they actually contain rather than assuming a pure taxonomy.
+CLASS_NAMES = ["Smooth", "Disk/Feature"]
+
 CONFIG = {
     "history_dir": LOG_DIR,
     "model_path": os.path.join(BASE_DIR, "models", "galaxy_classifier.keras"),
-    "data_path": os.path.join(PROCESSED_DIR, "galaxy_dataset_balanced_100x100.npz"),
+    "splits_path": os.path.join(PROCESSED_DIR, "galaxy_dataset_splits_100x100.npz"),
     "evaluation_dir": os.path.join(BASE_DIR, "evaluation"),
     "visualization_dir": os.path.join(BASE_DIR, "visualization", "publication"),
     "input_shape": (100, 100, 3),
     "sample_count": 16,
-    "class_names": ["Elliptical", "Spiral"],
+    "class_names": CLASS_NAMES,
     "class_colors": ["#1f77b4", "#ff7f0e", "#2ca02c"],
     "pub_dpi": 300
 }
@@ -52,8 +57,12 @@ CONFIG = {
 # =================================================================
 # CORE VISUALIZATION FUNCTIONS
 # =================================================================
-def create_publication_plots():
+def create_publication_plots(model_path=None, splits_path=None):
     """Generate all visualizations for publication"""
+    if model_path:
+        CONFIG['model_path'] = model_path
+    if splits_path:
+        CONFIG['splits_path'] = splits_path
     os.makedirs(CONFIG['visualization_dir'], exist_ok=True)
     print("\n===== GENERATING PUBLICATION VISUALIZATIONS =====")
 
@@ -61,21 +70,30 @@ def create_publication_plots():
         # Load essential data
         history = load_training_history()
         model = load_model()
-        with np.load(CONFIG['data_path']) as data:
-            images, labels = data['images'], data['labels']
 
-        # Get test set for evaluation metrics
-        _, X_test, _, y_test = train_test_split(
-            images, labels, test_size=0.15, stratify=labels, random_state=42
-        )
+        # v2: use the exact splits created by make_splits.py.
+        # The test set is the untouched one; samples for display come
+        # from the (balanced) training data so nothing leaks in.
+        with np.load(CONFIG['splits_path']) as data:
+            X_train, y_train = data['X_train'], data['y_train']
+            X_val, y_val = data['X_val'], data['y_val']
+            X_test, y_test = data['X_test'], data['y_test']
+        labels_all = np.concatenate([y_train, y_val, y_test])
+
         y_pred = model.predict(X_test, verbose=0)
         y_pred_probs = y_pred.flatten()
-        y_pred_classes = (y_pred_probs > 0.5).astype(int)
+        y_pred_classes = (y_pred_probs >= 0.5).astype(int)
 
         # Generate core visualizations
-        plot_training_history(history)
-        plot_class_distribution(labels)
-        plot_sample_predictions(model, images, labels)
+        if history is not None:
+            plot_training_history(history)
+        else:
+            print("No training history found - skipping training-history plot.")
+        plot_class_distribution(labels_all)
+        # Sample predictions on the validation split: the model never
+        # trained on it (only early-stopped on it), so the displayed
+        # confidences are honest.
+        plot_sample_predictions(model, X_val, y_val)
         plot_confusion_matrix(y_test, y_pred_classes)
         plot_roc_curve(y_test, y_pred_probs)
         plot_precision_recall_curve(y_test, y_pred_probs)
@@ -84,7 +102,7 @@ def create_publication_plots():
         plot_calibration_curve(y_test, y_pred_probs)
         plot_error_analysis(model, X_test, y_test, y_pred_classes)
         plot_per_class_metrics(y_test, y_pred_classes)
-        plot_galaxy_examples(images, labels)
+        plot_galaxy_examples(X_train, y_train)
 
         print("\n✅ All publication visualizations generated successfully!")
         print(f"📂 Output directory: {CONFIG['visualization_dir']}")
@@ -98,28 +116,28 @@ def create_publication_plots():
 # DATA LOADING AND UTILITIES
 # =================================================================
 def load_training_history():
-    """Load latest training history"""
+    """Load latest training history, or None if none exists yet
+    (e.g. when running in a session separate from training)."""
+    if not os.path.isdir(CONFIG['history_dir']):
+        return None
     history_files = [f for f in os.listdir(CONFIG['history_dir'])
                    if f.startswith('training_history_') and f.endswith('.json')]
     if not history_files:
-        raise FileNotFoundError("No training history files found")
+        return None
     history_files.sort(reverse=True)
     with open(os.path.join(CONFIG['history_dir'], history_files[0]), 'r') as f:
         return json.load(f)
 
 def load_model():
-    """Load model with fallback naming"""
-    try:
-        return tf.keras.models.load_model(CONFIG['model_path'])
-    except:
-        alt_path = os.path.join(BASE_DIR, "models", "ML-Glaxay classifier- Model- galaxy_classifier.keras")
-        return tf.keras.models.load_model(alt_path)
+    """Load the trained model (pass --model-path to override)."""
+    return tf.keras.models.load_model(CONFIG['model_path'])
 
 # =================================================================
 # PLOTTING FUNCTIONS
 # =================================================================
 def plot_training_history(history):
     """Training history with smoothed curves"""
+    # Apply simple smoothing for cleaner plots
     def smooth_curve(points, factor=0.8):
         smoothed = []
         for point in points:
@@ -165,6 +183,7 @@ def plot_class_distribution(labels):
     plt.title('Galaxy Class Distribution')
     plt.ylabel('Number of Galaxies')
 
+    # Annotate bars
     for bar, count in zip(bars, class_counts):
         height = bar.get_height()
         plt.text(bar.get_x() + bar.get_width()/2., height,
@@ -281,11 +300,13 @@ def plot_calibration_curve(y_true, y_scores):
 
 def plot_error_analysis(model, X_test, y_test, y_pred):
     """Visualize misclassified examples"""
+    # Identify misclassified samples
     incorrect = np.where(y_pred != y_test)[0]
     if len(incorrect) == 0:
         print("⚠️ No misclassified samples found")
         return
 
+    # Select up to 8 examples
     sample_indices = incorrect[:min(8, len(incorrect))]
     sample_images = X_test[sample_indices]
     sample_true = y_test[sample_indices]
@@ -293,6 +314,7 @@ def plot_error_analysis(model, X_test, y_test, y_pred):
     confidences = predictions.flatten()
     pred_classes = (predictions > 0.5).astype(int).flatten()
 
+    # Create plot
     plt.figure(figsize=(12, 8))
     for i, idx in enumerate(sample_indices):
         plt.subplot(2, 4, i+1)
@@ -322,8 +344,8 @@ def plot_per_class_metrics(y_true, y_pred):
         'F1-score': f1_score(y_true, y_pred, average=None)
     }
 
-    x = np.arange(len(CONFIG['class_names']))
-    width = 0.25
+    x = np.arange(len(CONFIG['class_names']))  # label locations
+    width = 0.25  # bar width
     multiplier = 0
 
     plt.figure(figsize=(10, 6))
@@ -349,19 +371,13 @@ def plot_galaxy_examples(images, labels):
     """Show representative examples of each class"""
     plt.figure(figsize=(10, 5))
 
-    elliptical_idx = np.where(labels == 0)[0][:4]
-    for i, idx in enumerate(elliptical_idx):
-        plt.subplot(2, 4, i+1)
-        plt.imshow(images[idx].astype('uint8'))
-        plt.title('Elliptical', fontsize=10)
-        plt.axis('off')
-
-    spiral_idx = np.where(labels == 1)[0][:4]
-    for i, idx in enumerate(spiral_idx):
-        plt.subplot(2, 4, i+5)
-        plt.imshow(images[idx].astype('uint8'))
-        plt.title('Spiral', fontsize=10)
-        plt.axis('off')
+    for ci in range(2):
+        idx = np.where(labels == ci)[0][:4]
+        for i, j in enumerate(idx):
+            plt.subplot(2, 4, ci * 4 + i + 1)
+            plt.imshow(images[j].astype('uint8'))
+            plt.title(CONFIG['class_names'][ci], fontsize=10)
+            plt.axis('off')
 
     plt.suptitle('Galaxy Type Examples', fontsize=16)
     plt.tight_layout()
@@ -373,4 +389,11 @@ def plot_galaxy_examples(images, labels):
 # MAIN EXECUTION
 # =================================================================
 if __name__ == "__main__":
-    create_publication_plots()
+    import argparse
+    parser = argparse.ArgumentParser(description="Generate publication visualizations")
+    parser.add_argument("--model-path", type=str, default=None,
+                        help="Path to .keras model (default: models/galaxy_classifier.keras)")
+    parser.add_argument("--splits", type=str, default=None,
+                        help="Path to splits .npz (default: data/processed/galaxy_dataset_splits_100x100.npz)")
+    args = parser.parse_args()
+    create_publication_plots(model_path=args.model_path, splits_path=args.splits)

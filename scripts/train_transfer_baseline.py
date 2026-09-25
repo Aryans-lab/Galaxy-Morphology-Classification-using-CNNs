@@ -1,142 +1,177 @@
+"""Transfer-learning baseline (baseline B): ResNet50 (ImageNet weights).
+
+The custom CNN in ``train_model.py`` learns from scratch on ~30k small
+(100x100) galaxy images. Standard practice in the galaxy morphology
+literature is to start from a backbone pretrained on ImageNet - this
+script does exactly that on the *same* v2 splits, so the two baselines
+differ only in initialization/features and are directly comparable.
+
+Recipe
+------
+1. Freeze the ResNet50 trunk, train the classification head (3 epochs).
+2. Unfreeze and fine-tune the whole network at a low LR with early
+   stopping on the untouched val split.
+
+Run on a GPU (Colab/Kaggle) for reasonable runtime; on CPU it works but
+is slow.
 """
-train_transfer_baseline.py — ResNet50 transfer-learning baseline (Baseline B).
-===============================================================================
-Uses ImageNet-pretrained ResNet50 as a frozen backbone, trains a small head,
-then fine-tunes the full network.  Same data split as the custom CNN so
-results are directly comparable.
 
-Run on GPU (Kaggle T4 / Colab):  python scripts/train_transfer_baseline.py
-"""
-
-import sys, os
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
-import json, logging, argparse
+import argparse
+import json
+import logging
+import os
+import sys
 from datetime import datetime
 
 import numpy as np
 import tensorflow as tf
-from tensorflow import keras
-from tensorflow.keras import layers
-from tensorflow.keras.applications import ResNet50
-from tensorflow.keras.applications.resnet50 import preprocess_input
-from utils import BASE_DIR, PROCESSED_DIR, LOG_DIR
+from tensorflow.keras import applications, callbacks, layers, models
 
-SPLITS_PATH   = os.path.join(PROCESSED_DIR, "galaxy_dataset_splits_100x100.npz")
-BALANCED_PATH = os.path.join(PROCESSED_DIR, "galaxy_dataset_train_balanced.npz")
-MODEL_PATH    = os.path.join(BASE_DIR, "models", "galaxy_classifier_resnet50.keras")
-
-CONFIG = {
-    "input_shape":   (100, 100, 3),
-    "batch_size":    32,
-    "head_epochs":   5,
-    "finetune_epochs": 20,
-    "head_lr":       1e-3,
-    "finetune_lr":   1e-4,
-    "patience":      5,
-    "seed":          42,
-}
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from utils import BASE_DIR, PROCESSED_DIR  # noqa: E402
 
 
-def build_model(input_shape=(100, 100, 3)) -> keras.Model:
-    """ResNet50 backbone + custom classification head."""
-    inputs = keras.Input(shape=input_shape)
-    x = preprocess_input(inputs)              # ImageNet normalisation
-
-    base = ResNet50(include_top=False, weights="imagenet", input_tensor=x)
-    base.trainable = False                    # freeze for head training
+def build_model(input_shape=(100, 100, 3), backbone="resnet50"):
+    """Backbone: 'resnet50' (default) or 'resnet18' (~2x faster; use if a
+    training run is close to a wall-clock budget, e.g. Kaggle's 1 h GPU)."""
+    class_name = {"resnet18": "ResNet18", "resnet50": "ResNet50"}.get(backbone)
+    if class_name is None:
+        raise ValueError(f"Unknown backbone: {backbone}")
+    base = getattr(applications, class_name)(
+        include_top=False, weights="imagenet", input_shape=input_shape
+    )
+    base.trainable = False
 
     x = base.output
     x = layers.GlobalAveragePooling2D()(x)
-    x = layers.Dense(256, activation="relu")(x)
+    x = layers.Dense(64, activation="relu")(x)
     x = layers.Dropout(0.3)(x)
-    outputs = layers.Dense(1, activation="sigmoid")(x)
+    out = layers.Dense(1, activation="sigmoid", name="probability")(x)
+    model = models.Model(inputs=base.input, outputs=out)
+    model.summary(print_fn=lambda s: logging.info(s))
+    return model
 
-    return keras.Model(inputs, outputs, name="resnet50_galaxy")
+
+def train(
+    balanced_path=None,
+    splits_path=None,
+    model_path=None,
+    input_shape=(100, 100, 3),
+    backbone="resnet50",
+    head_epochs=3,
+    fine_tune_epochs=17,
+    head_lr=1e-3,
+    ft_lr=1e-4,
+    patience=5,
+    batch_size=32,
+    seed=42,
+):
+    balanced_path = balanced_path or os.path.join(
+        PROCESSED_DIR, "galaxy_dataset_train_balanced.npz"
+    )
+    splits_path = splits_path or os.path.join(
+        PROCESSED_DIR, "galaxy_dataset_splits_100x100.npz"
+    )
+    if model_path is None:
+        model_path = os.path.join(BASE_DIR, "models", f"galaxy_classifier_{backbone}.keras")
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_dir = os.path.join(BASE_DIR, "logs")
+    os.makedirs(log_dir, exist_ok=True)
+    os.makedirs(os.path.dirname(model_path), exist_ok=True)
+    tb_dir = os.path.join(log_dir, "tensorboard", f"{backbone}_{timestamp}")
+
+    # ResNet50 ImageNet weights expect 0-255 uint8 input to
+    # preprocess_input; feed that directly (saves a conversion pass).
+    with np.load(balanced_path) as data:
+        X_train, y_train = data["images"], data["labels"]
+    with np.load(splits_path) as data:
+        X_val, y_val = data["X_val"], data["y_val"]
+
+    X_train = applications.resnet50.preprocess_input(X_train.astype("float32"))
+    X_val = applications.resnet50.preprocess_input(X_val.astype("float32"))
+
+    tf.keras.utils.set_random_seed(seed)
+    model = build_model(input_shape, backbone=backbone)
+
+    # Phase 1: head only
+    model.compile(
+        optimizer=tf.keras.optimizers.Adam(learning_rate=head_lr),
+        loss="binary_crossentropy",
+        metrics=["accuracy"],
+    )
+    model.fit(
+        X_train, y_train,
+        validation_data=(X_val, y_val),
+        epochs=head_epochs,
+        batch_size=batch_size,
+        callbacks=[callbacks.TensorBoard(log_dir=tb_dir, histogram_freq=1)],
+        verbose=1,
+    )
+
+    # Phase 2: fine-tune everything at a low LR
+    model.layers[0].trainable = True
+    model.compile(
+        optimizer=tf.keras.optimizers.Adam(learning_rate=ft_lr),
+        loss="binary_crossentropy",
+        metrics=["accuracy"],
+    )
+    history = model.fit(
+        X_train, y_train,
+        validation_data=(X_val, y_val),
+        epochs=fine_tune_epochs,
+        batch_size=batch_size,
+        callbacks=[
+            callbacks.TensorBoard(log_dir=tb_dir, histogram_freq=1),
+            callbacks.EarlyStopping(
+                monitor="val_loss", patience=patience, restore_best_weights=True
+            ),
+            callbacks.ModelCheckpoint(model_path, save_best_only=True),
+        ],
+        verbose=1,
+    )
+
+    with open(os.path.join(log_dir, f"training_history_{backbone}_{timestamp}.json"), "w") as f:
+        json.dump(history.history, f, indent=4)
+    logging.info(f"{backbone} training complete. Best model at {model_path}")
+    return model
 
 
-def train(args) -> bool:
+def main():
+    parser = argparse.ArgumentParser(description="Train the ResNet50 transfer baseline")
+    parser.add_argument("--model-path", type=str, default=None)
+    parser.add_argument("--backbone", type=str, default="resnet50",
+                        choices=["resnet50", "resnet18"])
+    parser.add_argument("--head-epochs", type=int, default=3)
+    parser.add_argument("--fine-tune-epochs", type=int, default=17)
+    parser.add_argument("--batch-size", type=int, default=32)
+    parser.add_argument("--seed", type=int, default=42)
+    args = parser.parse_args()
+
+    os.makedirs(os.path.join(BASE_DIR, "logs"), exist_ok=True)
     logging.basicConfig(
         level=logging.INFO,
-        format="%(asctime)s  %(levelname)s  %(message)s",
+        format="%(asctime)s - %(levelname)s - %(message)s",
         handlers=[
-            logging.StreamHandler(),
             logging.FileHandler(
-                os.path.join(LOG_DIR, f"train_resnet_{datetime.now():%Y%m%d_%H%M}.log")
+                os.path.join(BASE_DIR, "logs", f"train_{args.backbone}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
             ),
+            logging.StreamHandler(),
         ],
     )
-
-    tf.random.set_seed(CONFIG["seed"])
-    np.random.seed(CONFIG["seed"])
-
-    logging.info("Loading data ...")
-    bal    = np.load(args.balanced)
-    splits = np.load(args.splits)
-    X_tr, y_tr   = bal["images"],     bal["labels"]
-    X_val, y_val = splits["X_val"],   splits["y_val"]
-    logging.info(f"  Train: {len(X_tr)}   Val: {len(X_val)}")
-
-    model = build_model(tuple(CONFIG["input_shape"]))
-    model.summary(print_fn=logging.info)
-
-    early_stop = keras.callbacks.EarlyStopping(
-        monitor="val_accuracy", patience=CONFIG["patience"],
-        restore_best_weights=True, verbose=1
+    train(
+        model_path=args.model_path,
+        backbone=args.backbone,
+        head_epochs=args.head_epochs,
+        fine_tune_epochs=args.fine_tune_epochs,
+        batch_size=args.batch_size,
+        seed=args.seed,
     )
-    checkpoint = keras.callbacks.ModelCheckpoint(
-        args.model_path, monitor="val_accuracy", save_best_only=True, verbose=1
-    )
-
-    # Phase 1: train head only
-    logging.info("Phase 1 — training head (backbone frozen) ...")
-    model.compile(
-        optimizer=keras.optimizers.Adam(CONFIG["head_lr"]),
-        loss="binary_crossentropy",
-        metrics=["accuracy"],
-    )
-    h1 = model.fit(
-        X_tr, y_tr,
-        batch_size=CONFIG["batch_size"],
-        epochs=CONFIG["head_epochs"],
-        validation_data=(X_val, y_val),
-    )
-
-    # Phase 2: fine-tune full network
-    logging.info("Phase 2 — fine-tuning full network ...")
-    model.layers[1].trainable = True          # unfreeze ResNet50
-    model.compile(
-        optimizer=keras.optimizers.Adam(CONFIG["finetune_lr"]),
-        loss="binary_crossentropy",
-        metrics=["accuracy"],
-    )
-    h2 = model.fit(
-        X_tr, y_tr,
-        batch_size=CONFIG["batch_size"],
-        epochs=CONFIG["finetune_epochs"],
-        validation_data=(X_val, y_val),
-        callbacks=[early_stop, checkpoint],
-    )
-
-    history = {
-        k: [float(v) for v in (h1.history.get(k, []) + h2.history.get(k, []))]
-        for k in set(list(h1.history) + list(h2.history))
-    }
-    hist_path = os.path.join(LOG_DIR, f"resnet_history_{datetime.now():%Y%m%d_%H%M}.json")
-    with open(hist_path, "w") as f:
-        json.dump(history, f)
-
-    logging.info(f"History -> {hist_path}")
-    logging.info(f"Model   -> {args.model_path}")
-    return True
+    print(f"{args.backbone} training complete.")
+    print("Evaluate with: python scripts/evaluate_model.py "
+          f"--model-path models/galaxy_classifier_{args.backbone}.keras "
+          f"--output evaluation/metrics_cnn_{args.backbone}.json")
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--splits",     default=SPLITS_PATH)
-    parser.add_argument("--balanced",   default=BALANCED_PATH)
-    parser.add_argument("--model-path", default=MODEL_PATH)
-    args = parser.parse_args()
-    os.makedirs(os.path.dirname(args.model_path), exist_ok=True)
-    ok = train(args)
-    print("Done." if ok else "Failed.")
+    main()
